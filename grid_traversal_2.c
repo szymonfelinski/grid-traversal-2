@@ -1,7 +1,3 @@
-// main.c
-// Portable C99 - improved solver: exact for small components, fast randomized-greedy for large ones
-// Based on user's original file and tests.
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -14,8 +10,6 @@
 
 typedef struct { int rows, cols; bool **blocked; } Grid;
 typedef struct { int r, c; } Coord;
-
-/* ---------- basic helpers (from your base) ---------- */
 
 Grid *create_grid(int rows, int cols, int blocked_count, const int blocked_list[][2]) {
     if (rows <= 0 || cols <= 0) return NULL;
