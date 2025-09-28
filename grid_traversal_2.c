@@ -1,8 +1,3 @@
-// main.c
-// Portable C99
-// Single-approach solver: randomized greedy with BFS-to-nearest fallback
-// Clear, small helper functions. Tests included at the bottom.
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -10,7 +5,7 @@
 #include <time.h>
 #include <limits.h>
 
-#define GREEDY_TRIES 150
+#define GREEDY_TRIES 1
 
 typedef struct { int rows, cols; bool **blocked; } Grid;
 typedef struct { int r, c; } Coord;
@@ -339,13 +334,13 @@ int main(void) {
         printf("\n");
     }
 
-    // Test 5: 200x1000 with 200 random blocked cells
+    // Test 5: 10000x1000 with 10000 random blocked cells
     {
-        Grid *g = grid_create(200, 1000, 0, NULL);
-        grid_generate_blocked(g, 10000);
-        printf("Test 5 (200x1000, 10000 random blocks):\n");
+        Grid *g = grid_create(10000, 1000, 0, NULL);
+        grid_generate_blocked(g, 1000000);
+        printf("Test 5 (10000x1000, 1000000 random blocks):\n");
         // grid_print(g);
-        solve_path(g, 4000);
+        solve_path(g, 40000);
         grid_free(g);
         printf("\n");
     }
