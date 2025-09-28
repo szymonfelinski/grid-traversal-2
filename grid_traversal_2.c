@@ -341,11 +341,11 @@ int main(void) {
 
     // Test 5: 10x12 with 20 random blocked cells
     {
-        Grid *g = grid_create(10, 12, 0, NULL);
-        grid_generate_blocked(g, 20);
+        Grid *g = grid_create(200, 1200, 0, NULL);
+        grid_generate_blocked(g, 200);
         printf("Test 5 (10x12, 20 random blocks):\n");
         grid_print(g);
-        solve_path(g, 100);
+        solve_path(g, 4000);
         grid_free(g);
         printf("\n");
     }
