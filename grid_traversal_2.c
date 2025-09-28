@@ -1,11 +1,14 @@
-// main.c
-// Portable C99 - grid with generate_blocked integrated (works with bool **blocked)
+// main.c 
+// Portable C99 - base code extended with exact solver for small components
+// Falls back to greedy solver for larger components
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <time.h>
 #include <string.h>
+
+#define MAX_EXACT 50  // threshold for exact optimal search (component size <= this -> exact)
 
 // Grid struct: rows, cols, and blocked[row][col] boolean (true = blocked)
 typedef struct {
@@ -130,9 +133,177 @@ rejection:
     }
 }
 
+/* ----------------- New helper: find largest connected component -----------------
+ * Returns malloc'd array of coordinates (pairs of ints) listing all cells in the largest
+ * connected component of free (unblocked) cells. The function sets *out_count to size.
+ * If no free cell exists, returns NULL and out_count=0.
+ */
+typedef struct { int r, c; } Coord;
+
+Coord *find_largest_component(const Grid *g, int *out_count) {
+    *out_count = 0;
+    int R = g->rows, C = g->cols;
+    // visited map for BFS (dense)
+    unsigned char *visited = (unsigned char*)calloc((size_t)R * C, 1);
+    if (!visited) { fprintf(stderr, "alloc failed\n"); exit(1); }
+
+    int *qr = (int*)malloc((size_t)R * C * sizeof(int));
+    int *qc = (int*)malloc((size_t)R * C * sizeof(int));
+    if (!qr || !qc) { fprintf(stderr, "alloc failed\n"); exit(1); }
+
+    Coord *best = NULL;
+    int best_size = 0;
+
+    for (int r0 = 0; r0 < R; r0++) {
+        for (int c0 = 0; c0 < C; c0++) {
+            int idx0 = r0 * C + c0;
+            if (visited[idx0]) continue;
+            if (g->blocked[r0][c0]) { visited[idx0] = 1; continue; }
+            // BFS starting at (r0,c0)
+            int qh = 0, qt = 0;
+            qr[qt] = r0; qc[qt] = c0; qt++;
+            visited[idx0] = 1;
+            Coord *tmp = (Coord*)malloc(sizeof(Coord));
+            int cap = 1, sz = 0;
+            while (qh < qt) {
+                int r = qr[qh], c = qc[qh]; qh++;
+                if (sz >= cap) { cap *= 2; tmp = (Coord*)realloc(tmp, cap * sizeof(Coord)); if (!tmp) { fprintf(stderr,"realloc\n"); exit(1);} }
+                tmp[sz++] = (Coord){r, c};
+                int dr[4] = {-1,0,1,0};
+                int dc[4] = {0,1,0,-1};
+                for (int d = 0; d < 4; d++) {
+                    int nr = r + dr[d], nc = c + dc[d];
+                    if (nr < 0 || nr >= R || nc < 0 || nc >= C) continue;
+                    int idx = nr * C + nc;
+                    if (visited[idx]) continue;
+                    if (g->blocked[nr][nc]) { visited[idx] = 1; continue; }
+                    visited[idx] = 1;
+                    qr[qt] = nr; qc[qt] = nc; qt++;
+                }
+            }
+            if (sz > best_size) {
+                if (best) free(best);
+                best = tmp;
+                best_size = sz;
+            } else {
+                free(tmp);
+            }
+        }
+    }
+
+    free(qr); free(qc); free(visited);
+    *out_count = best_size;
+    return best;
+}
+
+/* ----------------- Exact solver for small components -----------------
+ * We'll run a DFS over the component cells (component size n <= MAX_EXACT).
+ * States: current cell (r,c) and visited_mask (n bits). We enumerate all walks up to K moves,
+ * tracking visited_mask and pruning using an admissible upper bound:
+ *   current_unique + min(remaining_steps, n - current_unique) <= best -> prune.
+ *
+ * This guarantees we find the optimal number of unique cells within the component for moves <= K.
+ */
+
+static int global_R, global_C, global_K, global_n;
+static Grid *global_grid;
+static Coord *global_nodes;        // list of component cells
+static int **node_index;           // mapping r x c -> index in nodes array (-1 if not in comp)
+static int best_unique;
+static int best_path_len;
+static Coord *best_path;
+static Coord *cur_path;
+
+// popcount for int
+static inline int popcount_int(int x) {
+    #if defined(__GNUC__) || defined(__clang__)
+        return __builtin_popcount((unsigned)x);
+    #else
+        int cnt=0; while(x){cnt+=x&1; x>>=1;} return cnt;
+    #endif
+}
+
+void dfs_exact(int r, int c, int steps_used, int visited_mask, int path_len) {
+    int current_unique = popcount_int(visited_mask);
+    // Update best if better
+    if (current_unique > best_unique) {
+        best_unique = current_unique;
+        best_path_len = path_len;
+        for (int i = 0; i < path_len; i++) best_path[i] = cur_path[i];
+    }
+    if (steps_used == global_K) return;
+    int remaining = global_K - steps_used;
+    int possible_gain = global_n - current_unique;
+    int ub = current_unique + (remaining < possible_gain ? remaining : possible_gain);
+    if (ub <= best_unique) return; // prune
+
+    // Try moves
+    int dr[4] = {-1,0,1,0};
+    int dc[4] = {0,1,0,-1};
+    for (int d = 0; d < 4; d++) {
+        int nr = r + dr[d], nc = c + dc[d];
+        if (nr < 0 || nr >= global_R || nc < 0 || nc >= global_C) continue;
+        if (global_grid->blocked[nr][nc]) continue;
+        int idx = node_index[nr][nc];
+        int new_mask = visited_mask;
+        if (idx >= 0) new_mask |= (1 << idx);
+        // step into nr,nc
+        cur_path[path_len] = (Coord){nr,nc};
+        dfs_exact(nr, nc, steps_used + 1, new_mask, path_len + 1);
+    }
+}
+
+// Wrapper: run exact search on component nodes array of size n, move budget K.
+// Returns path printed and prints unique count. Uses global arrays to store path.
+void run_exact_on_component(Grid *g, Coord *nodes, int n, int K) {
+    // build mapping node_index[r][c]
+    global_grid = g;
+    global_R = g->rows; global_C = g->cols; global_K = K;
+    global_nodes = nodes; global_n = n;
+
+    // allocate node_index as 2D int array
+    node_index = (int**)malloc(global_R * sizeof(int*));
+    for (int r = 0; r < global_R; r++) {
+        node_index[r] = (int*)malloc(global_C * sizeof(int));
+        for (int c = 0; c < global_C; c++) node_index[r][c] = -1;
+    }
+    for (int i = 0; i < n; i++) {
+        node_index[nodes[i].r][nodes[i].c] = i;
+    }
+
+    // allocate path buffers (max length K+1)
+    cur_path = (Coord*)malloc((size_t)(K + 1) * sizeof(Coord));
+    best_path = (Coord*)malloc((size_t)(K + 1) * sizeof(Coord));
+    best_unique = 0;
+    best_path_len = 0;
+
+    // Start DFS from each node (must consider start anywhere in the component)
+    for (int s = 0; s < n; s++) {
+        int sr = nodes[s].r, sc = nodes[s].c;
+        int mask = (1 << s);
+        cur_path[0] = (Coord){sr, sc};
+        dfs_exact(sr, sc, 0, mask, 1);
+    }
+
+    // Print best path and unique
+    if (best_path_len == 0) {
+        // No moves possible (shouldn't happen), but print trivial
+        printf("Path: (none)\nUnique squares visited: 0\n");
+    } else {
+        printf("Path:");
+        for (int i = 0; i < best_path_len; i++) printf(" (%d,%d)", best_path[i].r, best_path[i].c);
+        printf("\nUnique squares visited: %d\n", best_unique);
+    }
+
+    // cleanup
+    for (int r = 0; r < global_R; r++) free(node_index[r]);
+    free(node_index);
+    free(cur_path); free(best_path);
+}
+
+/* ----------------- Greedy fallback solver (your original) ----------------- */
 // Solve path (greedy) — moves up to movement_points and tries to maximize unique visited cells.
-// This is the same solver previously used; it prints the path then the unique count.
-void solve_path(Grid *g, int movement_points) {
+void greedy_solver(Grid *g, int movement_points) {
     if (!g) return;
     int rows = g->rows, cols = g->cols;
     // Find any unblocked start
@@ -215,6 +386,29 @@ void solve_path(Grid *g, int movement_points) {
     free(path_c);
 }
 
+/* ----------------- Top-level solver: exact when small, greedy otherwise ----------------- */
+void solve_path(Grid *g, int movement_points) {
+    if (!g) return;
+    // find largest connected component
+    int comp_size = 0;
+    Coord *nodes = find_largest_component(g, &comp_size);
+    if (!nodes || comp_size == 0) {
+        printf("Path: (none)\nUnique squares visited: 0\n");
+        if (nodes) free(nodes);
+        return;
+    }
+    if (comp_size <= MAX_EXACT) {
+        // exact search (optimal)
+        run_exact_on_component(g, nodes, comp_size, movement_points);
+        free(nodes);
+    } else {
+        // fallback to greedy solver (fast)
+        free(nodes);
+        greedy_solver(g, movement_points);
+    }
+}
+
+/* ----------------- Tests in main (kept as in base) ----------------- */
 int main(void) {
     srand((unsigned)time(NULL)); // seed RNG once
 
