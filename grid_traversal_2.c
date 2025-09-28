@@ -339,12 +339,12 @@ int main(void) {
         printf("\n");
     }
 
-    // Test 5: 10x12 with 20 random blocked cells
+    // Test 5: 200x1000 with 200 random blocked cells
     {
-        Grid *g = grid_create(200, 1200, 0, NULL);
-        grid_generate_blocked(g, 200);
-        printf("Test 5 (10x12, 20 random blocks):\n");
-        grid_print(g);
+        Grid *g = grid_create(200, 1000, 0, NULL);
+        grid_generate_blocked(g, 10000);
+        printf("Test 5 (200x1000, 10000 random blocks):\n");
+        // grid_print(g);
         solve_path(g, 4000);
         grid_free(g);
         printf("\n");
