@@ -97,59 +97,29 @@ rejection:
     }
 }
 
-/* --- largest connected component (BFS) --- */
-
-static Coord *find_largest_component(const Grid *g, int *out_count) {
-    *out_count = 0;
+static Coord *collect_free_cells(const Grid *g, int *out_count) {
     int R = g->rows, C = g->cols;
-    unsigned char *seen = calloc((size_t)R * C, 1);
-    if (!seen) { perror("calloc"); exit(1); }
-
-    int *qr = malloc((size_t)R * C * sizeof(int));
-    int *qc = malloc((size_t)R * C * sizeof(int));
-    if (!qr || !qc) { perror("malloc"); exit(1); }
-
-    Coord *best = NULL; int bestsz = 0;
-
-    for (int r0 = 0; r0 < R; ++r0) {
-        for (int c0 = 0; c0 < C; ++c0) {
-            int idx0 = r0 * C + c0;
-            if (seen[idx0]) continue;
-            if (g->blocked[r0][c0]) { seen[idx0] = 1; continue; }
-
-            int qh = 0, qt = 0;
-            qr[qt] = r0; qc[qt] = c0; ++qt;
-            seen[idx0] = 1;
-
-            Coord *tmp = malloc(sizeof(Coord));
-            int cap = 1, sz = 0;
-
-            while (qh < qt) {
-                int r = qr[qh], c = qc[qh]; ++qh;
-                if (sz >= cap) { cap *= 2; tmp = realloc(tmp, cap * sizeof(Coord)); if (!tmp) { perror("realloc"); exit(1); } }
-                tmp[sz++] = (Coord){r,c};
-                int dr[4] = {-1,0,1,0}, dc[4] = {0,1,0,-1};
-                for (int d = 0; d < 4; ++d) {
-                    int nr = r + dr[d], nc = c + dc[d];
-                    if (nr < 0 || nr >= R || nc < 0 || nc >= C) continue;
-                    int nidx = nr * C + nc;
-                    if (seen[nidx]) continue;
-                    if (g->blocked[nr][nc]) { seen[nidx] = 1; continue; }
-                    seen[nidx] = 1;
-                    qr[qt] = nr; qc[qt] = nc; ++qt;
-                }
+    long long total = (long long)R * C;
+    int count = 0;
+    // first pass: count free cells
+    for (int r = 0; r < R; ++r) for (int c = 0; c < C; ++c) if (!g->blocked[r][c]) ++count;
+    if (count == 0) { *out_count = 0; return NULL; }
+    // allocate and fill
+    Coord *arr = malloc((size_t)count * sizeof(Coord));
+    if (!arr) { perror("malloc"); exit(1); }
+    int pos = 0;
+    for (int r = 0; r < R; ++r) {
+        for (int c = 0; c < C; ++c) {
+            if (!g->blocked[r][c]) {
+                arr[pos].r = r;
+                arr[pos].c = c;
+                ++pos;
             }
-
-            if (sz > bestsz) { if (best) free(best); best = tmp; bestsz = sz; } else free(tmp);
         }
     }
-
-    free(qr); free(qc); free(seen);
-    *out_count = bestsz;
-    return best;
+    *out_count = count;
+    return arr;
 }
-
-/* --- BFS to nearest unvisited cell and return path (as sequence of coords) --- */
 
 static int bfs_to_nearest(const Grid *g, int sr, int sc, unsigned char *visited_flag,
                           int *out_r, int *out_c, int max_len) {
@@ -197,9 +167,9 @@ static int bfs_to_nearest(const Grid *g, int sr, int sc, unsigned char *visited_
     return 0;
 }
 
-/* --- randomized greedy solver --- */
-
 static void greedy_random(Grid *g, Coord *nodes, int n, int K, int tries) {
+    if (n <= 0) { printf("Path: (none)\nUnique squares visited: 0\n"); return; }
+
     int R = g->rows, C = g->cols, total = R * C;
     int best_unique = 0;
     int *best_pr = NULL, *best_pc = NULL, best_len = 0;
@@ -272,19 +242,17 @@ static void greedy_random(Grid *g, Coord *nodes, int n, int K, int tries) {
     free(pr); free(pc); free(tmp_r); free(tmp_c); free(visited_flag);
 }
 
-/* --- top-level solve: use greedy_random only --- */
-
 static void solve_path(Grid *g, int K) {
     if (!g) return;
-    int comp_size = 0;
-    Coord *nodes = find_largest_component(g, &comp_size);
-    if (!nodes || comp_size == 0) {
+    int free_count = 0;
+    Coord *nodes = collect_free_cells(g, &free_count);
+    if (!nodes || free_count == 0) {
         if (nodes) free(nodes);
         printf("Path: (none)\nUnique squares visited: 0\n");
         return;
     }
 
-    greedy_random(g, nodes, comp_size, K, GREEDY_TRIES);
+    greedy_random(g, nodes, free_count, K, GREEDY_TRIES);
     free(nodes);
 }
 
@@ -334,11 +302,11 @@ int main(void) {
         printf("\n");
     }
 
-    // Test 5: 10000x1000 with 10000 random blocked cells
+    // Test 5: 10000x1000 with 1000000 random blocked cells
     {
         Grid *g = grid_create(10000, 1000, 0, NULL);
         grid_generate_blocked(g, 1000000);
-        printf("Test 5 (10000x1000, 1000000 random blocks):\n");
+        printf("Test 5 (10000x1000, 1,000,000 random blocks):\n");
         // grid_print(g);
         solve_path(g, 40000);
         grid_free(g);
