@@ -4,14 +4,15 @@
 #include <string.h>
 #include <time.h>
 #include <limits.h>
+#include <stdint.h>
 
 #define GREEDY_TRIES 1
 
+// helper structs
 typedef struct { int rows, cols; bool **blocked; } Grid;
 typedef struct { int r, c; } Coord;
 
-/* --- grid management --- */
-
+// grid generation
 static Grid *grid_create(int rows, int cols, int blocked_count, const int blocked_list[][2]) {
     if (rows <= 0 || cols <= 0) return NULL;
     Grid *g = malloc(sizeof(Grid));
@@ -48,176 +49,214 @@ static void grid_print(const Grid *g) {
     }
 }
 
-/* --- random blocked placement --- */
-
+// random block cell generation
 static void grid_generate_blocked(Grid *g, int num_blocked) {
     if (!g || num_blocked <= 0) return;
-    long long rows = g->rows, cols = g->cols;
-    long long total = rows * cols;
-    long long already = 0;
-    for (int r = 0; r < g->rows; ++r)
-        for (int c = 0; c < g->cols; ++c)
-            if (g->blocked[r][c]) ++already;
-    long long available = total - already;
-    if (available <= 0) return;
-    if (num_blocked > available) num_blocked = (int)available;
 
-    if (available <= 2000000 || num_blocked * 4 > available) {
-        int *free_idx = malloc((size_t)available * sizeof(int));
-        if (!free_idx) goto rejection;
-        int pos = 0;
-        for (int r = 0; r < g->rows; ++r)
-            for (int c = 0; c < g->cols; ++c)
-                if (!g->blocked[r][c]) free_idx[pos++] = r * g->cols + c;
-        for (int i = 0; i < num_blocked; ++i) {
-            int j = i + rand() % (pos - i);
-            int tmp = free_idx[i]; free_idx[i] = free_idx[j]; free_idx[j] = tmp;
+    int R = g->rows;
+    int C = g->cols;
+
+    /* count free cells */
+    long long available = 0;
+    for (int r = 0; r < R; ++r) {
+        for (int c = 0; c < C; ++c) {
+            if (!g->blocked[r][c]) ++available;
         }
-        for (int i = 0; i < num_blocked; ++i) {
-            int idx = free_idx[i];
-            g->blocked[idx / g->cols][idx % g->cols] = true;
-        }
-        free(free_idx);
+    }
+    if (available <= 0) return;
+    if (num_blocked >= (int)available) {
+        /* block everything free */
+        for (int r = 0; r < R; ++r) for (int c = 0; c < C; ++c) if (!g->blocked[r][c]) g->blocked[r][c] = true;
         return;
     }
 
-rejection:
-    {
-        int placed = 0, attempts = 0;
-        int max_attempts = num_blocked * 30 + 1000;
-        while (placed < num_blocked && attempts < max_attempts) {
-            int r = rand() % g->rows, c = rand() % g->cols;
-            if (!g->blocked[r][c]) { g->blocked[r][c] = true; ++placed; }
-            ++attempts;
-        }
-        if (placed >= num_blocked) return;
-        for (int r = 0; r < g->rows && placed < num_blocked; ++r)
-            for (int c = 0; c < g->cols && placed < num_blocked; ++c)
+    /* build free-list (linear indices) */
+    int *free_idx = (int*)malloc((size_t)available * sizeof(int));
+    if (!free_idx) {
+        /* fallback: deterministic scan to block first num_blocked free cells */
+        int placed = 0;
+        for (int r = 0; r < R && placed < num_blocked; ++r) {
+            for (int c = 0; c < C && placed < num_blocked; ++c) {
                 if (!g->blocked[r][c]) { g->blocked[r][c] = true; ++placed; }
+            }
+        }
+        return;
     }
-}
 
-static Coord *collect_free_cells(const Grid *g, int *out_count) {
-    int R = g->rows, C = g->cols;
-    long long total = (long long)R * C;
-    int count = 0;
-    // first pass: count free cells
-    for (int r = 0; r < R; ++r) for (int c = 0; c < C; ++c) if (!g->blocked[r][c]) ++count;
-    if (count == 0) { *out_count = 0; return NULL; }
-    // allocate and fill
-    Coord *arr = malloc((size_t)count * sizeof(Coord));
-    if (!arr) { perror("malloc"); exit(1); }
     int pos = 0;
     for (int r = 0; r < R; ++r) {
         for (int c = 0; c < C; ++c) {
-            if (!g->blocked[r][c]) {
-                arr[pos].r = r;
-                arr[pos].c = c;
-                ++pos;
-            }
+            if (!g->blocked[r][c]) free_idx[pos++] = r * C + c;
         }
     }
+    /* partial Fisher–Yates: pick first num_blocked unique entries */
+    for (int i = 0; i < num_blocked; ++i) {
+        int j = i + rand() % (pos - i); /* random index in [i, pos-1] */
+        int tmp = free_idx[i]; free_idx[i] = free_idx[j]; free_idx[j] = tmp;
+    }
+    /* mark chosen ones blocked */
+    for (int i = 0; i < num_blocked; ++i) {
+        int idx = free_idx[i];
+        int rr = idx / C;
+        int cc = idx % C;
+        g->blocked[rr][cc] = true;
+    }
+    free(free_idx);
+}
+
+
+/* --- collect free cells (for start selection) --- */
+
+static Coord *collect_free_cells(const Grid *g, int *out_count) {
+    int R = g->rows, C = g->cols;
+    int count = 0;
+    for (int r = 0; r < R; ++r) for (int c = 0; c < C; ++c) if (!g->blocked[r][c]) ++count;
+    if (count == 0) { *out_count = 0; return NULL; }
+    Coord *arr = malloc((size_t)count * sizeof(Coord));
+    if (!arr) { perror("malloc"); exit(1); }
+    int pos = 0;
+    for (int r = 0; r < R; ++r)
+        for (int c = 0; c < C; ++c)
+            if (!g->blocked[r][c]) { arr[pos].r = r; arr[pos].c = c; ++pos; }
     *out_count = count;
     return arr;
 }
 
-static int bfs_to_nearest(const Grid *g, int sr, int sc, unsigned char *visited_flag,
-                          int *out_r, int *out_c, int max_len) {
-    int R = g->rows, C = g->cols, total = R * C;
-    int *qr = malloc(total * sizeof(int));
-    int *qc = malloc(total * sizeof(int));
-    int *parent = malloc(total * sizeof(int));
-    if (!qr || !qc || !parent) { perror("malloc"); exit(1); }
-    for (int i = 0; i < total; ++i) parent[i] = -1;
-    unsigned char *seen = calloc((size_t)total, 1);
-    if (!seen) { perror("calloc"); exit(1); }
+/* --- helper: check for unvisited neighbor --- */
 
+static inline bool has_unvisited_neighbor(const Grid *g, int r, int c, int R, int C, int *visited_epoch, int run_token) {
+    const int dr[4] = {-1,0,1,0}, dc[4] = {0,1,0,-1};
+    for (int d = 0; d < 4; ++d) {
+        int nr = r + dr[d], nc = c + dc[d];
+        if ((unsigned)nr >= (unsigned)R || (unsigned)nc >= (unsigned)C) continue;
+        if (g->blocked[nr][nc]) continue;
+        if (visited_epoch[nr * C + nc] != run_token) return true;
+    }
+    return false;
+}
+
+/* --- optimized BFS-to-nearest (reusable buffers + epoch markers) ---
+   queue_r/q_c, parent, seen_epoch preallocated by caller. Returns outsz path length and fills out_r/out_c.
+*/
+static int bfs_to_nearest_opt(const Grid *g,
+                              int sr, int sc,
+                              int *queue_r, int *queue_c, int *parent,
+                              int *seen_epoch, int seen_token,
+                              int *visited_epoch, int run_token,
+                              int *out_r, int *out_c, int max_len)
+{
+    int R = g->rows, C = g->cols, total = R * C;
     int qh = 0, qt = 0;
-    qr[qt] = sr; qc[qt] = sc; ++qt;
-    seen[sr * C + sc] = 1;
+    queue_r[qt] = sr; queue_c[qt] = sc; ++qt;
+    seen_epoch[sr * C + sc] = seen_token;
+    parent[sr * C + sc] = -1;
 
     while (qh < qt) {
-        int r = qr[qh], c = qc[qh]; ++qh;
+        int r = queue_r[qh], c = queue_c[qh]; ++qh;
         int idx = r * C + c;
-        if (!visited_flag[idx] && !g->blocked[r][c]) {
-            int path[1024], psz = 0;
+        if (visited_epoch[idx] != run_token && !g->blocked[r][c]) {
+            int path[1024]; int psz = 0;
             int cur = idx;
             while (cur != -1 && psz < max_len) { path[psz++] = cur; cur = parent[cur]; }
             int outsz = 0;
             for (int i = psz - 1; i >= 0 && outsz < max_len; --i) {
-                out_r[outsz] = path[i] / C; out_c[outsz] = path[i] % C; ++outsz;
+                out_r[outsz] = path[i] / C;
+                out_c[outsz] = path[i] % C;
+                ++outsz;
             }
-            free(qr); free(qc); free(parent); free(seen);
             return outsz;
         }
-        int dr[4] = {-1,0,1,0}, dc[4] = {0,1,0,-1};
+        const int dr[4] = {-1,0,1,0};
+        const int dc[4] = {0,1,0,-1};
         for (int d = 0; d < 4; ++d) {
             int nr = r + dr[d], nc = c + dc[d];
             if (nr < 0 || nr >= R || nc < 0 || nc >= C) continue;
             if (g->blocked[nr][nc]) continue;
             int nidx = nr * C + nc;
-            if (seen[nidx]) continue;
-            seen[nidx] = 1;
+            if (seen_epoch[nidx] == seen_token) continue;
+            seen_epoch[nidx] = seen_token;
             parent[nidx] = idx;
-            qr[qt] = nr; qc[qt] = nc; ++qt;
+            queue_r[qt] = nr; queue_c[qt] = nc; ++qt;
         }
     }
-
-    free(qr); free(qc); free(parent); free(seen);
     return 0;
 }
+
+/* --- greedy_random using optimized BFS --- */
 
 static void greedy_random(Grid *g, Coord *nodes, int n, int K, int tries) {
     if (n <= 0) { printf("Path: (none)\nUnique squares visited: 0\n"); return; }
 
     int R = g->rows, C = g->cols, total = R * C;
     int best_unique = 0;
-    int *best_pr = NULL, *best_pc = NULL, best_len = 0;
+    int *best_pr = NULL, *best_pc = NULL; int best_len = 0;
 
     int *pr = malloc((K + 1) * sizeof(int));
     int *pc = malloc((K + 1) * sizeof(int));
     int *tmp_r = malloc((K + 1) * sizeof(int));
     int *tmp_c = malloc((K + 1) * sizeof(int));
-    unsigned char *visited_flag = malloc((size_t)total);
-    if (!pr || !pc || !tmp_r || !tmp_c || !visited_flag) { perror("malloc"); exit(1); }
+
+    int *queue_r = malloc(total * sizeof(int));
+    int *queue_c = malloc(total * sizeof(int));
+    int *parent = malloc(total * sizeof(int));
+    int *seen_epoch = calloc(total, sizeof(int));
+    int *visited_epoch = calloc(total, sizeof(int)); // epoch marker for runs
+
+    if (!pr || !pc || !tmp_r || !tmp_c || !queue_r || !queue_c || !parent || !seen_epoch || !visited_epoch) {
+        perror("malloc"); exit(1);
+    }
+
+    int run_token = 1;
+    int seen_token_base = 1000000; // large offset to avoid conflict with run tokens; will increment
 
     for (int t = 0; t < tries; ++t) {
         int s = rand() % n;
         int cr = nodes[s].r, cc = nodes[s].c;
-        memset(visited_flag, 0, (size_t)total);
+        ++run_token;
+        if (run_token == 0) { memset(visited_epoch, 0, (size_t)total * sizeof(int)); run_token = 1; } // wrap safety
+
         int len = 0;
         pr[len] = cr; pc[len] = cc; ++len;
-        visited_flag[cr * C + cc] = 1;
+        visited_epoch[cr * C + cc] = run_token;
         int unique = 1;
 
-        for (int step = 0; step < K; ++step) {
+        int rem = K;
+        while (rem > 0) {
             bool moved = false;
             int dirs[4] = {0,1,2,3};
-            for (int i = 3; i > 0; --i) { int j = rand() % (i + 1); int tmp = dirs[i]; dirs[i] = dirs[j]; dirs[j] = tmp; }
+            for (int i = 3; i > 0; --i) { int j = rand() % (i+1); int tmp = dirs[i]; dirs[i] = dirs[j]; dirs[j] = tmp; }
             for (int di = 0; di < 4; ++di) {
                 int d = dirs[di];
                 int dr = (d==0?-1:(d==2?1:0)), dc = (d==1?1:(d==3?-1:0));
                 int nr = cr + dr, nc = cc + dc;
-                if (nr < 0 || nr >= R || nc < 0 || nc >= C) continue;
+                if ((unsigned)nr >= (unsigned)R || (unsigned)nc >= (unsigned)C) continue;
                 if (g->blocked[nr][nc]) continue;
-                if (!visited_flag[nr * C + nc]) {
+                int nidx = nr * C + nc;
+                if (visited_epoch[nidx] != run_token) {
                     cr = nr; cc = nc;
                     pr[len] = cr; pc[len] = cc; ++len;
-                    visited_flag[cr * C + cc] = 1; ++unique;
-                    moved = true; break;
+                    visited_epoch[nidx] = run_token; ++unique;
+                    --rem;
+                    moved = true;
+                    break;
                 }
             }
             if (moved) continue;
 
-            int remaining = K - step;
-            int outsz = bfs_to_nearest(g, cr, cc, visited_flag, tmp_r, tmp_c, remaining + 1);
-            if (outsz <= 1) break;
-            for (int i = 1; i < outsz && step < K; ++i, ++step) {
+            // BFS to nearest unvisited, bounded by remaining steps
+            int seen_token = ++seen_token_base;
+            int outsz = bfs_to_nearest_opt(g, cr, cc, queue_r, queue_c, parent, seen_epoch, seen_token,
+                                           visited_epoch, run_token, tmp_r, tmp_c, rem + 1);
+            if (outsz <= 1) break; // nothing reachable
+            // follow path (skip first)
+            for (int i = 1; i < outsz && rem > 0; ++i, --rem) {
                 cr = tmp_r[i]; cc = tmp_c[i];
                 pr[len] = cr; pc[len] = cc; ++len;
-                if (!visited_flag[cr * C + cc]) { visited_flag[cr * C + cc] = 1; ++unique; }
+                int idx = cr * C + cc;
+                if (visited_epoch[idx] != run_token) {
+                    visited_epoch[idx] = run_token; ++unique;
+                }
             }
-            --step;
         }
 
         if (unique > best_unique) {
@@ -239,8 +278,11 @@ static void greedy_random(Grid *g, Coord *nodes, int n, int K, int tries) {
         free(best_pr); free(best_pc);
     }
 
-    free(pr); free(pc); free(tmp_r); free(tmp_c); free(visited_flag);
+    free(pr); free(pc); free(tmp_r); free(tmp_c);
+    free(queue_r); free(queue_c); free(parent); free(seen_epoch); free(visited_epoch);
 }
+
+/* --- top-level solve --- */
 
 static void solve_path(Grid *g, int K) {
     if (!g) return;
@@ -251,12 +293,11 @@ static void solve_path(Grid *g, int K) {
         printf("Path: (none)\nUnique squares visited: 0\n");
         return;
     }
-
     greedy_random(g, nodes, free_count, K, GREEDY_TRIES);
     free(nodes);
 }
 
-/* --- tests --- */
+/* --- tests (unchanged) --- */
 
 int main(void) {
     srand((unsigned)time(NULL));
@@ -302,13 +343,12 @@ int main(void) {
         printf("\n");
     }
 
-    // Test 5: 10000x1000 with 1000000 random blocked cells
+    // Test 5: 100000x10000 with 1,000,000 random blocked cells
     {
-        Grid *g = grid_create(10000, 1000, 0, NULL);
-        grid_generate_blocked(g, 1000000);
-        printf("Test 5 (10000x1000, 1,000,000 random blocks):\n");
-        // grid_print(g);
-        solve_path(g, 40000);
+        Grid *g = grid_create(100000, 10000, 0, NULL);
+        grid_generate_blocked(g, 10000000);
+        printf("Test 5 (100000x10000, 1,000,000 random blocks):\n");
+        solve_path(g, 400000);
         grid_free(g);
         printf("\n");
     }
